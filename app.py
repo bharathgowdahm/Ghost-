@@ -1,75 +1,68 @@
-import os, ast, subprocess
-from dotenv import load_dotenv
-from openai import OpenAI
+import cv2
+import numpy as np
 import gradio as gr
-from 【entity-github¦canonical_name=GitHub】 import 【entity-Github¦canonical_name=GitHub】
+from PIL import Image
+import os
+from dotenv import load_dotenv
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI_API_KEY") else None
-MODEL = os.getenv("MODEL", "gpt-4o-mini")
 
-def analyze_repo(repo_url):
-    if not repo_url:
-        return "Paste a 【entity-GitHub¦canonical_name=GitHub】 URL", "", ""
+# Professional Inpainting Engine
+def ghost_erase(image, mask, method="NS", blur=3):
+    """
+    image: PIL Image
+    mask: dict with mask image (from gr.Image with mask)
+    method: NS (Navier-Stokes) or TELEA (Fast Marching)
+    """
+    if image is None:
+        return None, "Upload an image first"
 
-    # Clone shallow
-    name = repo_url.rstrip('/').split('/')[-1]
-    path = f"/tmp/{name}"
-    subprocess.run(["rm", "-rf", path])
-    subprocess.run(["git", "clone", "--depth", "1", repo_url, path])
-
-    # Code stats
-    files = []
-    for root, _, filenames in os.walk(path):
-        for f in filenames:
-            if f.endswith(('.py','.js','.ts','.go')):
-                files.append(os.path.join(root, f))
-
-    tree = f"Total code files: {len(files)}\n"
-    sample_code = ""
-    if files:
-        with open(files[0], 'r', errors='ignore') as fp:
-            sample_code = fp.read()[:4000]
-
-    # AI Analysis
-    if client:
-        prompt = f"""You are a senior GitHub code reviewer.
-        Analyze this repo: {repo_url}
-        Sample file content:
-        {sample_code}
-        Give:
-        1. What this project does (2 lines)
-        2. Tech Stack
-        3. 3 Security / Quality issues
-        4. How to improve to get 1k stars
-        """
-        resp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role":"user","content":prompt}]
-        )
-        ai_report = resp.choices[0].message.content
+    # Handle gradio ImageEditor format
+    if isinstance(image, dict):
+        bg = image['background']
+        mask_img = image['layers'][0] if image['layers'] else None
+        if mask_img is None:
+            return bg, "Paint over the ghost area to erase"
+        img = np.array(bg)
+        m = np.array(mask_img)[:, :, 3] # alpha channel is mask
     else:
-        ai_report = "⚠️ Add OPENAI_API_KEY in.env to get real AI report (mock mode active)"
+        # Fallback for older gradio
+        img = np.array(image['image']) if isinstance(image, dict) else np.array(image)
+        m = np.array(mask) if mask is not None else None
+        if m is None:
+            return image, "Paint over ghost to erase"
 
-    # Auto README
-    readme_prompt = f"Generate a professional GitHub README.md for {repo_url} based on: {sample_code[:2000]}. Include badges, features, install, usage."
-    if client:
-        r2 = client.chat.completions.create(model=MODEL, messages=[{"role":"user","content":readme_prompt}])
-        readme = r2.choices[0].message.content
-    else:
-        readme = f"# {name}\nAuto-generated README (add API key for full version)"
+    # Convert mask to binary
+    if len(m.shape) == 3:
+        m = m[:,:,0]
+    _, binary_mask = cv2.threshold(m, 10, 255, cv2.THRESH_BINARY)
 
-    return tree, ai_report, readme
+    # Dilate mask for clean erase
+    kernel = np.ones((blur, blur), np.uint8)
+    binary_mask = cv2.dilate(binary_mask, kernel, iterations=2)
 
-with gr.Blocks(theme=gr.themes.Glass(), title="GHOST") as demo:
-    gr.Markdown("# 👻 GHOST - GitHub Intelligence OS\nPaste any GitHub repo → Get AI report + Pro README in 10s")
-    url = gr.Textbox(label="GitHub Repo URL", placeholder="https://github.com/psf/requests")
-    btn = gr.Button("Analyze 🔍", variant="primary")
-    with gr.Row():
-        stats = gr.Textbox(label="Stats")
-        report = gr.Markdown(label="AI Intelligence Report")
-    readme_out = gr.Markdown(label="Generated README.md")
-    btn.click(analyze_repo, inputs=url, outputs=[stats, report, readme_out])
+    # Inpaint - Professional method
+    img_cv = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    flag = cv2.INPAINT_NS if method == "NS (Best Quality)" else cv2.INPAINT_TELEA
+    inpainted = cv2.inpaint(img_cv, binary_mask, 3, flag)
 
-if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0")
+    result_rgb = cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB)
+
+    # Post-process - slight sharpening
+    result_rgb = cv2.detailEnhance(result_rgb, sigma_s=10, sigma_r=0.15)
+
+    return Image.fromarray(result_rgb), f"✅ Ghost erased! Cleaned {np.count_nonzero(binary_mask)} pixels"
+
+def auto_detect_ghosts(image):
+    """Auto detect possible ghosting / shadows using OpenCV"""
+    if image is None:
+        return None
+    img = np.array(image) if not isinstance(image, dict) else np.array(image['background'])
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    # Detect semi-transparent edges (ghosting artifact)
+    edges = cv2.Canny(gray, 50, 150)
+    # Highlight as suggestion
+    overlay = img.copy()
+    overlay[edges > 0] = [255, 0, 0] # Red overlay for suggested ghost areas
+    blended = cv2.addWeighted(img, 0.7, overlay, 0.3, 0)
+    return Image.fromarray
