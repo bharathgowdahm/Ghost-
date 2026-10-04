@@ -1,0 +1,5 @@
+openai
+python-dotenv
+gradio==4.31.0
+PyGithub
+GitPython
