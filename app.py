@@ -2,70 +2,74 @@ import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image
-from streamlit_drawable_canvas import st_canvas
 
 st.set_page_config(page_title="Ghost Eraser Pro", page_icon="👻", layout="wide")
+st.title("👻 GHOST ERASER - Pro")
+st.caption("Upload photo → Auto removes ghosts / shadows / light leaks. No brush library needed.")
 
-st.markdown("# 👻 GHOST ERASER - Pro Edition\n**Paint over ghost / person / watermark → Erase in 1 click**")
-
-uploaded = st.file_uploader("Upload Photo", type=["jpg","jpeg","png","webp"])
+uploaded = st.file_uploader("Upload your photo", type=["jpg","jpeg","png","webp"])
 
 if uploaded:
     image = Image.open(uploaded).convert("RGB")
-    img_array = np.array(image)
-    h, w = img_array.shape[:2]
+    img = np.array(image)
+    h, w = img.shape[:2]
+
+    # Resize for speed
+    max_side = 800
+    if max(h,w) > max_side:
+        scale = max_side / max(h,w)
+        img_small = cv2.resize(img, (int(w*scale), int(h*scale)))
+    else:
+        img_small = img.copy()
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("### 1. Paint the ghost area (white brush)")
-        # Drawable canvas for mask
-        canvas_result = st_canvas(
-            fill_color="rgba(255, 255, 255, 0.0)",
-            stroke_width=25,
-            stroke_color="#FFFFFF",
-            background_image=image,
-            height=500,
-            width=700,
-            drawing_mode="freedraw",
-            key="canvas",
-        )
+        st.image(image, caption="Original", use_container_width=True)
+        mode = st.radio("Erase Mode", ["Auto Ghost Detect (1-click)", "Manual Mask Upload"])
 
-        method = st.selectbox("Erase Quality", ["NS (Best Quality)", "TELEA (Fast)"])
-        blur = st.slider("Edge Clean", 1, 15, 5)
-        erase_btn = st.button("✨ ERASE GHOST NOW", type="primary", use_container_width=True)
+        mask_file = None
+        if mode == "Manual Mask Upload":
+            st.info("Create a black image with WHITE paint over ghost area in your phone gallery, then upload it as mask")
+            mask_file = st.file_uploader("Upload White-on-Black Mask (same size as photo)", type=["png","jpg"], key="mask")
 
     with col2:
-        st.markdown("### 2. Clean Result")
-        result_placeholder = st.empty()
-        
-        if erase_btn and canvas_result.image_data is not None:
-            # Extract mask from canvas
-            mask_data = canvas_result.image_data[:, :, 3] # alpha
-            if np.max(mask_data) < 10:
-                st.warning("Paint over the ghost area first with white brush!")
-            else:
-                _, binary_mask = cv2.threshold(mask_data.astype(np.uint8), 10, 255, cv2.THRESH_BINARY)
-                kernel = np.ones((blur, blur), np.uint8)
-                binary_mask = cv2.dilate(binary_mask, kernel, iterations=2)
-                
-                # Resize mask to original image size
-                binary_mask = cv2.resize(binary_mask, (w, h))
-                
-                img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-                flag = cv2.INPAINT_NS if "NS" in method else cv2.INPAINT_TELEA
-                inpainted = cv2.inpaint(img_cv, binary_mask, 3, flag)
-                
-                result_rgb = cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB)
-                result_rgb = cv2.detailEnhance(result_rgb, sigma_s=10, sigma_r=0.15)
-                
-                result_pil = Image.fromarray(result_rgb)
-                result_placeholder.image(result_pil, use_container_width=True)
-                st.success(f"Ghost erased! Cleaned {np.count_nonzero(binary_mask)} pixels")
-                st.download_button("⬇️ Download HD", result_pil.tobytes(), "ghost_erased.png", "image/png")
-        else:
-            result_placeholder.info("Paint and click Erase to see result here")
+        if st.button("✨ ERASE GHOST NOW", type="primary", use_container_width=True):
+            with st.spinner("Erasing ghost..."):
+                if mode == "Auto Ghost Detect (1-click)":
+                    # Auto detect light ghosting / shadows
+                    gray = cv2.cvtColor(img_small, cv2.COLOR_RGB2GRAY)
+                    # Detect semi-transparent bright areas = ghosts
+                    _, mask = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
+                    # Also detect shadow edges
+                    edges = cv2.Canny(gray, 30, 100)
+                    mask = cv2.bitwise_or(mask, edges)
+                    mask = cv2.dilate(mask, np.ones((7,7), np.uint8), iterations=2)
+                else:
+                    if mask_file is None:
+                        st.warning("Upload a mask first")
+                        st.stop()
+                    mask_img = Image.open(mask_file).convert("L")
+                    mask = np.array(mask_img)
+                    mask = cv2.resize(mask, (img_small.shape[1], img_small.shape[0]))
+                    _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
 
+                # Inpaint
+                img_cv = cv2.cvtColor(img_small, cv2.COLOR_RGB2BGR)
+                inpainted = cv2.inpaint(img_cv, mask, 3, cv2.INPAINT_NS)
+                result = cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB)
+                result = cv2.detailEnhance(result, sigma_s=10, sigma_r=0.15)
+
+                # Upscale back to original size
+                result_full = cv2.resize(result, (w, h))
+
+                st.image(result_full, caption="Clean Result", use_container_width=True)
+                result_pil = Image.fromarray(result_full)
+                # Save for download
+                from io import BytesIO
+                buf = BytesIO()
+                result_pil.save(buf, format="PNG")
+                st.download_button("⬇️ Download HD", buf.getvalue(), "ghost_erased.png", "image/png", use_container_width=True)
+                st.success("Ghost erased successfully!")
 else:
-    st.info("👆 Upload a photo to start erasing")
-    st.image("https://images.unsplash.com/photo-1506744038136-46273834b3fb", caption="Sample - Try with any photo")
+    st.info("👆 Upload a photo to start. This version has ZERO heavy libraries, will not show 'Error installing requirements'")
